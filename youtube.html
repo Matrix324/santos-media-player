@@ -24,14 +24,13 @@
 
     window.MediaPlayer = {
         player:     null,
-        _syncTime:  START_SEC,   // last known video position (seconds)
-        _syncSetAt: Date.now(),  // wall-clock when _syncTime was recorded
+        _syncTime:  START_SEC,
+        _syncSetAt: Date.now(),
 
         isReady: function () {
             return !!this.player && typeof this.player.seekTo === 'function';
         },
 
-        // Expected video position right now, extrapolated from the last sync.
         _target: function () {
             return this._syncTime + (Date.now() - this._syncSetAt) / 1000;
         },
@@ -54,20 +53,29 @@
         },
 
         // Direct seek — no diffTime guard.
-        // Used by the Skip Ad button, the 6-second init timer, and pause/resume.
         seek: function (t) {
             this._record(t);
             if (this.isReady()) this.player.seekTo(t, true);
         },
 
-        // Drift-correcting sync with a 2-second guard to prevent micro-stutters
-        // during normal playback.  Used by the Lua Think() periodic sync.
-        // Also acts as the automatic ad-skip path once drift > 2 s.
+        // Drift-correcting sync with 2 s guard to prevent micro-stutters.
         syncTo: function (t) {
             this._record(t);
             if (!this.isReady()) return;
             if (Math.abs(this.player.getCurrentTime() - t) < 2) return;
             this.player.seekTo(t, true);
+        },
+
+        // Reload the page at the target timestamp.
+        // seekTo() is ignored by YouTube during non-skippable ads; a fresh
+        // page load creates a new player session that skips the current ad.
+        skipAd: function (t) {
+            this._record(t);
+            window.location.replace(
+                window.location.pathname +
+                '?v='    + encodeURIComponent(VIDEO_ID) +
+                '&start=' + Math.floor(Math.max(t, 0))
+            );
         }
     };
 
@@ -77,6 +85,7 @@
 
     window.onYouTubeIframeAPIReady = function () {
         window.MediaPlayer.player = new YT.Player('player', {
+            host:    'https://www.youtube-nocookie.com',
             videoId: VIDEO_ID,
             playerVars: {
                 autoplay:       1,
@@ -94,11 +103,8 @@
         });
     };
 
-    // YouTube's iframe player sends postMessage events to this parent page.
-    // "infoDelivery" events carry live player state, including a "playerAdParams"
-    // field that is present whenever an ad is loading or playing.
-    // On detection we seek to the extrapolated current video position to
-    // interrupt the ad.  Throttled to once per second to avoid spam.
+    // Try seekTo() on ad detection — works for some ad types instantly.
+    // For ads that ignore seekTo(), the Skip Ad button falls back to skipAd().
     var _lastAdSeek = 0;
     window.addEventListener('message', function (e) {
         var data;
@@ -112,13 +118,10 @@
 
         var p = window.MediaPlayer.player;
         if (!p || !p.seekTo) return;
-
-        var t = Math.floor(window.MediaPlayer._target());
-        p.seekTo(Math.max(t, 0), true);
+        p.seekTo(Math.max(Math.floor(window.MediaPlayer._target()), 0), true);
     });
 
-    // Also auto-click the native YouTube skip button for skippable ads —
-    // works independently of seekTo and handles all skippable ad types.
+    // Auto-click native YouTube skip button for skippable ads.
     setInterval(function () {
         var btn = document.querySelector(
             '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'
