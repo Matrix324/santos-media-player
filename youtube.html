@@ -40,25 +40,15 @@
             this._syncSetAt = Date.now();
         },
 
-        setVolume: function (v) {
-            if (this.isReady()) this.player.setVolume(v);
-        },
+        setVolume: function (v) { if (this.isReady()) this.player.setVolume(v); },
+        play:      function ()  { if (this.isReady()) this.player.playVideo(); },
+        pause:     function ()  { if (this.isReady()) this.player.pauseVideo(); },
 
-        play: function () {
-            if (this.isReady()) this.player.playVideo();
-        },
-
-        pause: function () {
-            if (this.isReady()) this.player.pauseVideo();
-        },
-
-        // Direct seek — no diffTime guard.
         seek: function (t) {
             this._record(t);
             if (this.isReady()) this.player.seekTo(t, true);
         },
 
-        // Drift-correcting sync with 2 s guard to prevent micro-stutters.
         syncTo: function (t) {
             this._record(t);
             if (!this.isReady()) return;
@@ -66,15 +56,14 @@
             this.player.seekTo(t, true);
         },
 
-        // Reload the page at the target timestamp.
-        // seekTo() is ignored by YouTube during non-skippable ads; a fresh
-        // page load creates a new player session that skips the current ad.
         skipAd: function (t) {
-            this._record(t);
+            if (t != null) this._record(t);
+            // Reload at the current video position — creates a fresh player
+            // session that bypasses the current ad entirely.
             window.location.replace(
                 window.location.pathname +
-                '?v='    + encodeURIComponent(VIDEO_ID) +
-                '&start=' + Math.floor(Math.max(t, 0))
+                '?v='     + encodeURIComponent(VIDEO_ID) +
+                '&start=' + Math.floor(Math.max(this._target(), 0))
             );
         }
     };
@@ -103,31 +92,62 @@
         });
     };
 
-    // Try seekTo() on ad detection — works for some ad types instantly.
-    // For ads that ignore seekTo(), the Skip Ad button falls back to skipAd().
-    var _lastAdSeek = 0;
+    // YouTube's player sends infoDelivery postMessages to this parent page
+    // with live player state including ad parameters.
+    //
+    // For skippable ads, playerAdParams contains skipOffsetMilliseconds —
+    // the exact time (from ad start) when the native skip button appears.
+    // We track this and fire skipAd() at that precise moment automatically.
+    //
+    // Non-skippable ads have no skipOffsetMilliseconds and must be waited
+    // out (or the manual Skip Ad button in the TV menu can reload the page).
+
+    var _adActive    = false;
+    var _adStartedAt = 0;
+    var _skipTimer   = null;
+
+    function _autoSkip() {
+        if (!_adActive) return;
+        // Try seekTo first — instant if this ad type allows it.
+        var p = window.MediaPlayer.player;
+        if (p && p.seekTo) p.seekTo(Math.max(Math.floor(window.MediaPlayer._target()), 0), true);
+        // If the ad is still playing 700 ms later, do a full page reload.
+        setTimeout(function () {
+            if (_adActive) window.MediaPlayer.skipAd();
+        }, 700);
+    }
+
     window.addEventListener('message', function (e) {
         var data;
         try { data = JSON.parse(e.data); } catch (err) { return; }
         if (!data || data.event !== 'infoDelivery' || !data.info) return;
-        if (!data.info.playerAdParams) return;
 
-        var now = Date.now();
-        if (now - _lastAdSeek < 1000) return;
-        _lastAdSeek = now;
+        var params = data.info.playerAdParams;
 
-        var p = window.MediaPlayer.player;
-        if (!p || !p.seekTo) return;
-        p.seekTo(Math.max(Math.floor(window.MediaPlayer._target()), 0), true);
+        if (!params) {
+            // playerAdParams gone means content is now playing.
+            _adActive = false;
+            if (_skipTimer) { clearTimeout(_skipTimer); _skipTimer = null; }
+            return;
+        }
+
+        // An ad is active.
+        if (!_adActive) {
+            _adActive    = true;
+            _adStartedAt = Date.now();
+        }
+
+        // Schedule the auto-skip for the moment the skip button appears.
+        // skipOffsetMilliseconds is only present for skippable ads.
+        if (_skipTimer === null && params.skipOffsetMilliseconds != null) {
+            var elapsed = Date.now() - _adStartedAt;
+            var delay   = Math.max(params.skipOffsetMilliseconds - elapsed, 0);
+            _skipTimer  = setTimeout(function () {
+                _skipTimer = null;
+                _autoSkip();
+            }, delay);
+        }
     });
-
-    // Auto-click native YouTube skip button for skippable ads.
-    setInterval(function () {
-        var btn = document.querySelector(
-            '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'
-        );
-        if (btn && btn.offsetParent !== null) btn.click();
-    }, 500);
 }());
 </script>
 </body>
