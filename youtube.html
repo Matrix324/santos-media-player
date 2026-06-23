@@ -14,21 +14,31 @@
     function parseQuery(qs) {
         var p = {}, t, re = /[?&]?([^=]+)=([^&]*)/g;
         qs = qs.split('+').join(' ');
-        while ((t = re.exec(qs))) {
-            p[decodeURIComponent(t[1])] = decodeURIComponent(t[2]);
-        }
+        while ((t = re.exec(qs))) p[decodeURIComponent(t[1])] = decodeURIComponent(t[2]);
         return p;
     }
 
-    var q = parseQuery(document.location.search);
+    var q         = parseQuery(document.location.search);
     var VIDEO_ID  = q.v || '';
     var START_SEC = q.start ? parseInt(q.start, 10) : 0;
 
     window.MediaPlayer = {
-        player: null,
+        player:     null,
+        _syncTime:  START_SEC,   // last known video position (seconds)
+        _syncSetAt: Date.now(),  // wall-clock when _syncTime was recorded
 
         isReady: function () {
             return !!this.player && typeof this.player.seekTo === 'function';
+        },
+
+        // Expected video position right now, extrapolated from the last sync.
+        _target: function () {
+            return this._syncTime + (Date.now() - this._syncSetAt) / 1000;
+        },
+
+        _record: function (t) {
+            this._syncTime  = t;
+            this._syncSetAt = Date.now();
         },
 
         setVolume: function (v) {
@@ -43,18 +53,18 @@
             if (this.isReady()) this.player.pauseVideo();
         },
 
-        // Direct seek with no diffTime guard.
+        // Direct seek — no diffTime guard.
         // Used by the Skip Ad button, the 6-second init timer, and pause/resume.
         seek: function (t) {
+            this._record(t);
             if (this.isReady()) this.player.seekTo(t, true);
         },
 
         // Drift-correcting sync with a 2-second guard to prevent micro-stutters
         // during normal playback.  Used by the Lua Think() periodic sync.
-        // Also acts as the automatic ad-skip path: during a pre-roll ad,
-        // getCurrentTime() stays near 0 while syncTime grows, so after ~2 s
-        // the drift exceeds 2 s and the ad is interrupted via seekTo().
+        // Also acts as the automatic ad-skip path once drift > 2 s.
         syncTo: function (t) {
+            this._record(t);
             if (!this.isReady()) return;
             if (Math.abs(this.player.getCurrentTime() - t) < 2) return;
             this.player.seekTo(t, true);
@@ -84,7 +94,31 @@
         });
     };
 
-    // Auto-click the native YouTube skip button for skippable ads.
+    // YouTube's iframe player sends postMessage events to this parent page.
+    // "infoDelivery" events carry live player state, including a "playerAdParams"
+    // field that is present whenever an ad is loading or playing.
+    // On detection we seek to the extrapolated current video position to
+    // interrupt the ad.  Throttled to once per second to avoid spam.
+    var _lastAdSeek = 0;
+    window.addEventListener('message', function (e) {
+        var data;
+        try { data = JSON.parse(e.data); } catch (err) { return; }
+        if (!data || data.event !== 'infoDelivery' || !data.info) return;
+        if (!data.info.playerAdParams) return;
+
+        var now = Date.now();
+        if (now - _lastAdSeek < 1000) return;
+        _lastAdSeek = now;
+
+        var p = window.MediaPlayer.player;
+        if (!p || !p.seekTo) return;
+
+        var t = Math.floor(window.MediaPlayer._target());
+        p.seekTo(Math.max(t, 0), true);
+    });
+
+    // Also auto-click the native YouTube skip button for skippable ads —
+    // works independently of seekTo and handles all skippable ad types.
     setInterval(function () {
         var btn = document.querySelector(
             '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'
