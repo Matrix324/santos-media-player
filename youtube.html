@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        html, body { width: 100%; height: 100%; }
+        body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+        #player { width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+<div id="player"></div>
+<script>
+(function () {
+    function parseQuery(qs) {
+        var p = {}, t, re = /[?&]?([^=]+)=([^&]*)/g;
+        qs = qs.split('+').join(' ');
+        while ((t = re.exec(qs))) {
+            p[decodeURIComponent(t[1])] = decodeURIComponent(t[2]);
+        }
+        return p;
+    }
+
+    var q = parseQuery(document.location.search);
+    var VIDEO_ID  = q.v || '';
+    var START_SEC = q.start ? parseInt(q.start, 10) : 0;
+
+    window.MediaPlayer = {
+        player: null,
+
+        isReady: function () {
+            return !!this.player && typeof this.player.seekTo === 'function';
+        },
+
+        setVolume: function (v) {
+            if (this.isReady()) this.player.setVolume(v);
+        },
+
+        play: function () {
+            if (this.isReady()) this.player.playVideo();
+        },
+
+        pause: function () {
+            if (this.isReady()) this.player.pauseVideo();
+        },
+
+        // Direct seek with no diffTime guard.
+        // Used by the Skip Ad button, the 6-second init timer, and pause/resume.
+        seek: function (t) {
+            if (this.isReady()) this.player.seekTo(t, true);
+        },
+
+        // Drift-correcting sync with a 2-second guard to prevent micro-stutters
+        // during normal playback.  Used by the Lua Think() periodic sync.
+        // Also acts as the automatic ad-skip path: during a pre-roll ad,
+        // getCurrentTime() stays near 0 while syncTime grows, so after ~2 s
+        // the drift exceeds 2 s and the ad is interrupted via seekTo().
+        syncTo: function (t) {
+            if (!this.isReady()) return;
+            if (Math.abs(this.player.getCurrentTime() - t) < 2) return;
+            this.player.seekTo(t, true);
+        }
+    };
+
+    var tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+
+    window.onYouTubeIframeAPIReady = function () {
+        window.MediaPlayer.player = new YT.Player('player', {
+            videoId: VIDEO_ID,
+            playerVars: {
+                autoplay:       1,
+                controls:       0,
+                cc_load_policy: 1,
+                disablekb:      1,
+                modestbranding: 1,
+                rel:            0,
+                showinfo:       0,
+                start:          START_SEC
+            },
+            events: {
+                onReady: function (e) { e.target.playVideo(); }
+            }
+        });
+    };
+
+    // Auto-click the native YouTube skip button for skippable ads.
+    setInterval(function () {
+        var btn = document.querySelector(
+            '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'
+        );
+        if (btn && btn.offsetParent !== null) btn.click();
+    }, 500);
+}());
+</script>
+</body>
+</html>
